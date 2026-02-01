@@ -1,0 +1,76 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+cell_detection_env/
+venv/
+ENV/
+env/
+.venv/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Data and models (large files)
+data/
+models/
+models.rar
+*.rar
+*.tar.gz
+unrar/
+unrarsrc-6.0.2.tar.gz
+
+# Results and outputs (generated files)
+outputs/
+activation_maps/
+attention_results/
+correct_gradcam_results/
+evaluation_results/
+final_correct_gradcam/
+final_gradcam_results/
+gradcam_final/
+gradcam_heatmaps/
+gradcam_results/
+gradcam_working/
+improved_gradcam_results/
+master_gradcam_results/
+real_gradcam_results/
+true_gradcam_results/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

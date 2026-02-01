@@ -1,0 +1,15 @@
+{
+  "total_test_images": 493,
+  "classes": [
+    "Benign",
+    "Early",
+    "Pre",
+    "Pro"
+  ],
+  "models_tested": [
+    "final_DenseNet121_Transfer_4Class.h5",
+    "best_DenseNet121_Transfer_4Class_phase2.h5",
+    "best_DenseNet121_Transfer_4Class_phase1.h5"
+  ],
+  "note": "This is a simplified analysis without full TensorFlow loading"
+}
