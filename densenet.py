@@ -78,27 +78,45 @@ class Config:
     FREEZE_EPOCHS = model_config["freeze_epochs"]
     FINE_TUNE_EPOCHS = model_config["finetune_epochs"]
 
-def create_densenet121_transfer_model(fine_tune=False):
-    """Tạo DenseNet121 transfer learning model"""
+def create_densenet121_transfer_model(fine_tune=False, unfreeze_layers=None):
+    """Tạo DenseNet121 transfer learning model
+
+    Args:
+        fine_tune: Nếu True, sẽ unfreeze layers cho fine-tuning
+        unfreeze_layers: Số layers cuối được unfreeze (None = tất cả layers)
+    """
     print(f"🏗️ Xây dựng DenseNet121 Transfer Learning model (fine_tune={fine_tune})...")
-    
+
     # Load pre-trained DenseNet121
     base_model = DenseNet121(
         weights='imagenet',
         include_top=False,
         input_shape=Config.INPUT_SHAPE
     )
-    
+
+    total_layers = len(base_model.layers)
+    print(f"📊 Total layers in DenseNet121: {total_layers}")
+
     # Freeze base model layers
     if not fine_tune:
         for layer in base_model.layers[:Config.FREEZE_LAYERS]:
             layer.trainable = False
         print(f"🔒 Frozen first {Config.FREEZE_LAYERS} layers")
     else:
-        # Fine-tuning: unfreeze some layers
-        for layer in base_model.layers:
-            layer.trainable = True
-        print("🔓 All layers unfrozen for fine-tuning")
+        # Fine-tuning: unfreeze layers
+        if unfreeze_layers is not None and unfreeze_layers < total_layers:
+            # Chỉ unfreeze N layers cuối cùng
+            freeze_until = total_layers - unfreeze_layers
+            for layer in base_model.layers[:freeze_until]:
+                layer.trainable = False
+            for layer in base_model.layers[freeze_until:]:
+                layer.trainable = True
+            print(f"🔓 Unfrozen last {unfreeze_layers} layers (frozen first {freeze_until} layers)")
+        else:
+            # Unfreeze tất cả
+            for layer in base_model.layers:
+                layer.trainable = True
+            print("🔓 All layers unfrozen for fine-tuning")
     
     # Add custom classification head optimized for DenseNet
     model = models.Sequential([
@@ -258,7 +276,8 @@ def train_model_two_phase(model, train_gen, val_gen, model_save_dir):
     if os.path.exists(phase1_model_path):
         print("📂 Loading phase 1 weights...")
         try:
-            phase1_model = keras.models.load_model(phase1_model_path)
+            # compile=False để tránh warning về metrics chưa được build
+            phase1_model = keras.models.load_model(phase1_model_path, compile=False)
             model.set_weights(phase1_model.get_weights())
         except Exception as e:
             print(f"⚠️ Could not load phase 1 weights: {e}")
@@ -458,8 +477,85 @@ def plot_training_history(history, results_dir):
     
     print(f"✅ Training plots saved to: {plot_path}")
 
+def train_phase2_only(model_save_dir, train_gen, val_gen, unfreeze_layers=None):
+    """Chỉ chạy Phase 2 với model đã train từ Phase 1
+
+    Args:
+        unfreeze_layers: Số layers cuối được unfreeze (None = tất cả)
+    """
+    print("\n🔥 PHASE 2 ONLY: Fine-tuning DenseNet121")
+    print("=" * 50)
+
+    # Tạo model mới với fine_tune=True
+    model = create_densenet121_transfer_model(fine_tune=True, unfreeze_layers=unfreeze_layers)
+
+    # Load weights từ Phase 1
+    phase1_model_path = os.path.join(model_save_dir, f"best_{Config.MODEL_NAME}_phase1.h5")
+    if not os.path.exists(phase1_model_path):
+        print(f"❌ Phase 1 model not found: {phase1_model_path}")
+        print("⚠️ Vui lòng chạy Phase 1 trước hoặc kiểm tra đường dẫn model.")
+        return None, None
+
+    print(f"📂 Loading phase 1 weights from: {phase1_model_path}")
+    try:
+        phase1_model = keras.models.load_model(phase1_model_path, compile=False)
+        model.set_weights(phase1_model.get_weights())
+        print("✅ Phase 1 weights loaded successfully!")
+    except Exception as e:
+        print(f"❌ Could not load phase 1 weights: {e}")
+        return None, None
+
+    # Compile với learning rate thấp cho fine-tuning
+    model.compile(
+        optimizer=optimizers.Adam(
+            learning_rate=Config.FINE_TUNE_LR,
+            beta_1=0.9,
+            beta_2=0.999,
+            epsilon=1e-8
+        ),
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy']
+    )
+
+    callbacks_list = setup_callbacks(model_save_dir, "phase2")
+
+    steps_per_epoch = train_gen.samples // Config.BATCH_SIZE
+    validation_steps = val_gen.samples // Config.BATCH_SIZE
+
+    history = model.fit(
+        train_gen,
+        steps_per_epoch=steps_per_epoch,
+        epochs=Config.FINE_TUNE_EPOCHS,
+        validation_data=val_gen,
+        validation_steps=validation_steps,
+        callbacks=callbacks_list,
+        class_weight=Config.CLASS_WEIGHTS,
+        verbose=1
+    )
+
+    return model, history.history
+
+
 def main():
     """Main function"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='DenseNet121 Transfer Learning Training')
+    parser.add_argument('--phase', type=int, choices=[1, 2], default=0,
+                       help='Chọn phase để chạy: 1=Phase1 only, 2=Phase2 only, 0=Both (default)')
+    parser.add_argument('--phase1-model', type=str, default=None,
+                       help='Đường dẫn tới model Phase 1 (chỉ dùng khi --phase=2)')
+    parser.add_argument('--batch-size', type=int, default=None,
+                       help='Override batch size (giảm xuống 4-8 nếu hết RAM)')
+    parser.add_argument('--unfreeze-layers', type=int, default=None,
+                       help='Số layers cuối được unfreeze trong Phase 2 (mặc định: all). Ví dụ: 50 = chỉ unfreeze 50 layers cuối')
+    args = parser.parse_args()
+
+    # Override batch size nếu được chỉ định
+    if args.batch_size:
+        Config.BATCH_SIZE = args.batch_size
+        print(f"⚙️ Override batch size: {args.batch_size}")
+
     print("🩺 DenseNet121 Transfer Learning 4-Class Training")
     print("=" * 50)
     
@@ -491,33 +587,110 @@ def main():
     
     # Create data generators
     train_gen, val_gen, test_gen = create_data_generators()
-    
-    # Create model
-    model = create_densenet121_transfer_model(fine_tune=False)
-    
-    print("📊 Model Summary:")
-    print(f"📈 Total parameters: {model.count_params():,}")
-    print(f"🔒 Trainable parameters: {sum([tf.keras.backend.count_params(w) for w in model.trainable_weights]):,}")
-    
-    # Two-phase training
-    model, combined_history = train_model_two_phase(model, train_gen, val_gen, model_save_dir)
-    
+
+    # Xử lý theo phase được chọn
+    if args.phase == 2:
+        # Chỉ chạy Phase 2
+        print(f"\n🎯 Mode: Phase 2 Only (Fine-tuning)")
+
+        # Nếu có custom path cho phase1 model
+        if args.phase1_model:
+            # Copy model vào model_save_dir với tên đúng format
+            import shutil
+            target_path = os.path.join(model_save_dir, f"best_{Config.MODEL_NAME}_phase1.h5")
+            if args.phase1_model != target_path:
+                print(f"📋 Copying phase1 model to: {target_path}")
+                shutil.copy(args.phase1_model, target_path)
+
+        model, history = train_phase2_only(model_save_dir, train_gen, val_gen, unfreeze_layers=args.unfreeze_layers)
+
+        if model is None:
+            print("❌ Phase 2 training failed!")
+            return
+
+        combined_history = history
+
+    elif args.phase == 1:
+        # Chỉ chạy Phase 1
+        print(f"\n🎯 Mode: Phase 1 Only (Frozen base)")
+
+        model = create_densenet121_transfer_model(fine_tune=False)
+
+        print("📊 Model Summary:")
+        print(f"📈 Total parameters: {model.count_params():,}")
+        print(f"🔒 Trainable parameters: {sum([tf.keras.backend.count_params(w) for w in model.trainable_weights]):,}")
+
+        # Compile
+        model.compile(
+            optimizer=optimizers.Adam(
+                learning_rate=Config.INITIAL_LR,
+                beta_1=0.9,
+                beta_2=0.999,
+                epsilon=1e-7
+            ),
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+
+        callbacks_list = setup_callbacks(model_save_dir, "phase1")
+
+        steps_per_epoch = train_gen.samples // Config.BATCH_SIZE
+        validation_steps = val_gen.samples // Config.BATCH_SIZE
+
+        history = model.fit(
+            train_gen,
+            steps_per_epoch=steps_per_epoch,
+            epochs=Config.FREEZE_EPOCHS,
+            validation_data=val_gen,
+            validation_steps=validation_steps,
+            callbacks=callbacks_list,
+            class_weight=Config.CLASS_WEIGHTS,
+            verbose=1
+        )
+
+        combined_history = history.history
+        print(f"\n✅ Phase 1 completed! Model saved at: {model_save_dir}")
+        print("💡 Để chạy Phase 2, sử dụng: python densenet.py --phase 2")
+
+    else:
+        # Chạy cả 2 phase (default)
+        print(f"\n🎯 Mode: Full Training (Phase 1 + Phase 2)")
+
+        model = create_densenet121_transfer_model(fine_tune=False)
+
+        print("📊 Model Summary:")
+        print(f"📈 Total parameters: {model.count_params():,}")
+        print(f"🔒 Trainable parameters: {sum([tf.keras.backend.count_params(w) for w in model.trainable_weights]):,}")
+
+        model, combined_history = train_model_two_phase(model, train_gen, val_gen, model_save_dir)
+
     # Plot training history
-    plot_training_history(combined_history, results_dir)
-    
+    if combined_history:
+        plot_training_history(combined_history, results_dir)
+
     # Load best model for evaluation
-    best_model_path = os.path.join(model_save_dir, f"best_{Config.MODEL_NAME}_phase2.h5")
+    if args.phase == 1:
+        best_model_path = os.path.join(model_save_dir, f"best_{Config.MODEL_NAME}_phase1.h5")
+    else:
+        best_model_path = os.path.join(model_save_dir, f"best_{Config.MODEL_NAME}_phase2.h5")
+
     if os.path.exists(best_model_path):
         print("📂 Loading best model for evaluation...")
-        model = keras.models.load_model(best_model_path)
-    
+        model = keras.models.load_model(best_model_path, compile=False)
+        model.compile(
+            optimizer='adam',
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+
     # Evaluate model
     results = evaluate_model(model, test_gen, results_dir)
-    
+
     # Save final model
-    final_model_path = os.path.join(model_save_dir, f"final_{Config.MODEL_NAME}.h5")
+    phase_suffix = f"_phase{args.phase}" if args.phase in [1, 2] else ""
+    final_model_path = os.path.join(model_save_dir, f"final_{Config.MODEL_NAME}{phase_suffix}.h5")
     model.save(final_model_path)
-    
+
     print(f"\n🎉 Training completed!")
     print(f"📁 Results saved in: {output_dir}")
     print(f"🎯 Test Accuracy: {results['test_accuracy']:.4f}")
